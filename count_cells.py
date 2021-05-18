@@ -3,9 +3,17 @@ import os
 import sys
 import cv2 as cv
 import matplotlib.pyplot as plt
+import pandas as pd
+from sklearn.cluster import DBSCAN
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.widgets import RectangleSelector
+import matplotlib.pylab as pylab
+params = {
+    'figure.figsize': (10, 10),
+    'axes.titlesize': 'xx-small'
+}
+pylab.rcParams.update(params)
 
 import numpy as np
 from tensorflow import keras
@@ -19,12 +27,13 @@ def dice_loss(y_true, y_pred, smooth=1):
     """
     intersection = K.sum(K.abs(y_true * y_pred), axis=-1)
     return (
-        (2. * intersection + smooth) /
-        (K.sum(K.square(y_true), -1) + K.sum(K.square(y_pred), -1) + smooth)
+            (2. * intersection + smooth) /
+            (K.sum(K.square(y_true), -1) + K.sum(K.square(y_pred), -1) + smooth)
     )
 
 
 model = keras.models.load_model('model.h5', custom_objects={'dice_loss': dice_loss})
+count_model = keras.models.load_model('count_model.h5')
 
 
 class CustomDialog(QtWidgets.QDialog):
@@ -97,18 +106,6 @@ class Widget(QtWidgets.QWidget):
         btn4.clicked.connect(self.countCells)
         grid.addWidget(btn4, 2, 1)
 
-        # # Show Previous Image Button
-        # btn5 = QtWidgets.QPushButton('Показать предыдущее изображение', self)
-        # btn5.resize(btn5.sizeHint())
-        # btn5.clicked.connect(self.showImage)
-        # grid.addWidget(btn5, 2, 0)
-        #
-        # # Show Next Image Button
-        # btn6 = QtWidgets.QPushButton('Показать следующее изображение', self)
-        # btn6.resize(btn6.sizeHint())
-        # btn6.clicked.connect(self.showImage)
-        # grid.addWidget(btn6, 2, 1)
-
         self.show()
 
     def getFilesNames(self):
@@ -127,6 +124,7 @@ class Widget(QtWidgets.QWidget):
             self.curImage = cv.cvtColor(self.curImage, cv.COLOR_BGR2RGB)
             plt.cla()
             self.ax = self.figure.add_subplot(111)
+            self.ax.titlesize = 14
             self.ax.imshow(self.curImage)
             plt.axis('off')
             self.ax.set_title(self.curFileName.split('/')[-1])
@@ -170,8 +168,6 @@ class Widget(QtWidgets.QWidget):
     def lineSelectCallback(self, click, release):
         x1, y1 = click.xdata, click.ydata
         x2, y2 = release.xdata, release.ydata
-        print("(%3.2f, %3.2f) --> (%3.2f, %3.2f)" % (x1, y1, x2, y2))
-        print("(%3.0f, %3.0f) --> (%3.0f, %3.0f)" % (x1, y1, x2, y2))
         try:
             dlg = CustomDialog()
             if dlg.exec():
@@ -183,19 +179,33 @@ class Widget(QtWidgets.QWidget):
         except IndexError:
             pass
 
-    def countCells(self, threshold=0.8):
-        global model
+    def countCells(self):
+        global model, count_model
         if self.curImage is not None:
-            self.curImage = cv.resize(self.curImage, (512, 512)) / 255.
-            mask = model.predict(np.expand_dims(self.curImage, 0))[0][..., 0]
-            print(mask)
-            self.ax.imshow(
-                mask
-                # np.ma.masked_array(
-                #     self.curImage,
-                #     np.repeat(np.expand_dims(mask, -1), 3, axis=-1)
-                # ),
-                # alpha=0.7
+            self.curImage = cv.resize(self.curImage, (512, 512)) / 255
+            mask = (model.predict(np.expand_dims(self.curImage, 0)) > 0.1)[0]
+
+            counter = 0
+            coord = pd.DataFrame(data=np.argwhere(mask[..., 0]), columns=['x', 'y'])
+            dbscan_repr = DBSCAN(min_samples=2, eps=1).fit_predict(coord)
+            coord['label'] = dbscan_repr
+            for i in range(0, dbscan_repr.max()+1):
+                df = coord[coord["label"] == i]
+                df = df.transform(lambda x: x - x.min() + 32)
+                img = np.zeros((64, 64))
+                for row in df.iterrows():
+                    img[row[1][0], row[1][1]] = 1
+                counter += round(count_model(
+                    np.expand_dims(np.repeat(np.expand_dims(img, -1), 3, axis=2), 0)
+                ).numpy()[0, 0])
+
+            masked = self.curImage.copy()
+            masked[np.repeat(mask, 3, axis=-1) == 0] = 0
+            self.ax.imshow(self.curImage)
+            self.ax.imshow(masked, alpha=0.7)
+            plt.text(
+                self.curImage.shape[0], 0, f'{counter} клеток',
+                bbox=dict(fill=False, edgecolor='green', linewidth=2)
             )
             plt.axis('off')
             self.ax.set_title(self.curFileName.split('/')[-1])
